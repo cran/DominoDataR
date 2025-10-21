@@ -43,21 +43,104 @@ object_http <- function(verb = "GET",
   if (datasource_type == "GenericS3Config") {
     config <- httr::config(ssl_verifypeer = FALSE)
   }
+  if (datasource_type == "NetAppVolumeConfig") {
+    token <- get_netapp_token()
+    if (!is.null(token) && token != "") {
+      headers["Authorization"] <- paste("Bearer", token)
+    }
+  }
 
   h <- do.call(httr::add_headers, headers)
 
+  r <- make_request(verb, url, h, config, request_body, write_disk)
+  if (r$status_code == 400) {
+    new_url <- encode_url_path(url)
+    r <- make_request(verb, new_url, h, config, request_body, write_disk)
+  }
+  r
+}
+
+
+#' Make the HTTP request
+#'
+#' @details Internal only to enable retry for malformed URLs.
+#' @param verb A character string containing an HTTP verb
+#' @param url Signed URL to download object at.
+#' @param config A list of config values for the REST call.
+#' @param headers A list of request headers for the REST call.
+#' @param request_body A character string containing request body data.
+#' @param write_disk An argument like \code{\link[httr]{write_disk}} to
+#'   write the result directly to disk.
+#'
+#' @return a \code{\link[httr]{response}} object.
+make_request <- function(verb, url, config, headers, request_body, write_disk) {
   if (verb == "GET") {
     if (!is.null(write_disk)) {
-      r <- httr::GET(url, h, config, write_disk)
+      r <- httr::GET(url, headers, config, write_disk)
     } else {
-      r <- httr::GET(url, h, config)
+      r <- httr::GET(url, headers, config)
     }
   } else if (verb == "PUT") {
     if (is.character(request_body) && request_body == "") {
-      r <- httr::PUT(url, h, config)
+      r <- httr::PUT(url, headers, config)
     } else {
-      r <- httr::PUT(url, h, config, body = request_body)
+      r <- httr::PUT(url, headers, config, body = request_body)
     }
   }
   r
+}
+
+
+#' Properly escape a URL path
+#'
+#' @details Internal only to fix malformed URLs.
+#' @param url URL to properly escape
+#'
+#' @return escaped url
+encode_url_path <- function(url) {
+  parsed <- urltools::url_parse(url)
+  parsed$path <- urltools::url_encode(parsed$path)
+  urltools::url_compose(parsed)
+}
+
+
+#' Get NetApp volume authentication token
+#'
+#' @details Retrieves JWT token for NetApp volume authentication.
+#'   Checks DOMINO_TOKEN_FILE and DOMINO_API_PROXY environment variables.
+#'
+#' @return JWT token string or NULL if not available
+#' @keywords internal
+get_netapp_token <- function() {
+  # Try to read from token file first
+  token_file <- Sys.getenv("DOMINO_TOKEN_FILE", "")
+  if (token_file != "" && file.exists(token_file)) {
+    tryCatch({
+      token <- readLines(token_file, n = 1, warn = FALSE)
+      if (length(token) > 0 && token != "") {
+        return(token)
+      }
+    }, error = function(e) {
+      warning("Failed to read token from file: ", e$message)
+    })
+  }
+
+  # Try to get token from API proxy
+  api_proxy <- Sys.getenv("DOMINO_API_PROXY", "")
+  if (api_proxy != "") {
+    url <- paste0(api_proxy, "/access-token")
+    tryCatch({
+      response <- httr::GET(url)
+      if (httr::status_code(response) == 200) {
+        token <- httr::content(response, "text", encoding = "UTF-8")
+        if (!is.null(token) && token != "") {
+          return(token)
+        }
+      }
+    }, error = function(e) {
+      warning("Failed to retrieve token from API proxy: ", e$message)
+    })
+  }
+
+  return(NULL)
 }
